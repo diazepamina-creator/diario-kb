@@ -178,7 +178,7 @@ ul.g{padding-left:20px;margin:6px 0}ul.g li{margin:3px 0;font-size:15px}
 
 <script>
 "use strict";
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const KEY = "diariokb.v1";
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -215,14 +215,20 @@ function curWeek(){
   const m = curMonth(); if (!m) return 1;
   return Math.min(weeksOf(m), Math.max(1, Math.floor(daysBetween(DB.current.start, todayIso()) / 7) + 1));
 }
-// Valor fijo u objeto por semana → valor de la semana indicada (o la más cercana anterior).
-function wv(v, w){
+// Valor fijo, objeto por semana ({"1":…}) u objeto por número de entreno del mes ({"byWorkout":{"1":…}}).
+let CTX_N = null; // número de entreno del mes en contexto
+function nearest(o, k){ const ks = Object.keys(o).map(Number).sort((a, b) => a - b); if (k == null) return o[ks[0]]; let best = ks[0]; ks.forEach(x => { if (x <= k) best = x; }); return o[best]; }
+function wv(v, w, n = CTX_N){
   if (v == null || typeof v !== "object" || Array.isArray(v)) return v;
+  if (v.byWorkout) return v.byWorkout[n] != null ? v.byWorkout[n] : nearest(v.byWorkout, n);
   if (v[w] != null) return v[w];
   const ks = Object.keys(v).map(Number).sort((a, b) => a - b);
   let best = ks[0]; ks.forEach(k => { if (k <= w) best = k; });
   return v[best];
 }
+const nums = v => (String(v ?? "").match(/\d+(\.\d+)?/g) || []).map(Number);
+// Descanso en segundos: número, o texto con minutos/segundos ("5-10 min" → 300, el mínimo del rango).
+function restSecs(rs){ if (typeof rs === "number") return rs; const n = nums(rs); if (!n.length) return null; return /min/i.test(String(rs)) ? Math.min(...n) * 60 : (/\bs\b|seg/i.test(String(rs)) ? Math.min(...n) : null); }
 const firstNum = v => { const m = String(v ?? "").match(/\d+(\.\d+)?/); return m ? Number(m[0]) : null; };
 const hasLoad = it => ["kb","2kb","bu"].includes(it.load);
 function repsTxt(it, w){
@@ -238,8 +244,14 @@ function blockMeta(b, w){
   if (b.type === "sets"){ if (st) p.push(`${st} series`); }
   if (b.type === "interval"){ if (wk) p.push(`${wk} s trabajo`); if (smin || smax) p.push(`${smin && smax && smin !== smax ? smin + "-" + smax : (smax || smin)} series`); }
   if (b.type === "otm"){ if (ev) p.push(`cada ${ev >= 60 && ev % 60 === 0 ? (ev === 60 ? "minuto" : ev/60 + " min") : ev + " s"}`); if (wk) p.push(`${wk} s trabajo`); if (mn) p.push(`${mn} min`); else if (st) p.push(`${st} series`); }
+  const tg = wv(b.target, w); if (tg) p.push(tg);
   if (rs != null && rs !== "") p.push(typeof rs === "number" ? `descanso ${rs >= 60 ? fmtSecs(rs) : rs + " s"}` : rs);
   return p.join(" · ");
+}
+function workoutKeys(b){
+  const ks = new Set(); const scan = v => { if (v && typeof v === "object" && v.byWorkout) Object.keys(v.byWorkout).forEach(k => ks.add(Number(k))); };
+  Object.values(b).forEach(scan); (b.items || []).forEach(it => Object.values(it).forEach(scan));
+  return [...ks].sort((a, c) => a - c);
 }
 function sessionSummary(s){ return s.blocks.map(b => b.label).join(" · "); }
 
@@ -251,7 +263,7 @@ function renderTop(){
   const a = DB.active;
   if (a){
     const m = DB.months[a.month];
-    $("#topTitle").innerHTML = `Sesión ${esc(a.session)} · en curso<small>Mes ${a.month}${m ? " · " + esc(m.name) : ""} · semana ${a.week}</small>`;
+    $("#topTitle").innerHTML = `Sesión ${esc(a.session)} · en curso<small>Mes ${a.month} · semana ${a.week}${a.workout ? " · entreno " + a.workout : ""}</small>`;
     $("#topRight").innerHTML = `<span class="pill brand" id="elapsed">${fmtSecs(Math.floor((Date.now() - a.startedAt)/1000))}</span>`;
   } else {
     const m = curMonth();
@@ -299,7 +311,7 @@ function renderTrain(){
   if (m.tablesMissing || !m.sessions.length){
     h += `<div class="note">Este mes todavía no tiene las sesiones transcritas (solo las pautas). Importa la versión completa del archivo en la pestaña Meses.</div>`;
   } else {
-    h += `<div class="card"><div class="card-b"><h2>Sesiones</h2>${next ? `<p class="hint" style="margin-top:2px">Toca: sesión ${esc(next)}</p>` : `<p class="hint" style="margin-top:2px">Semana completa. Si quieres, repite alguna.</p>`}
+    h += `<div class="card"><div class="card-b"><h2>Sesiones</h2>${next ? `<p class="hint" style="margin-top:2px">Toca: sesión ${esc(next)} · entreno ${logsM.length + 1} del mes</p>` : `<p class="hint" style="margin-top:2px">Semana completa. Si quieres, repite alguna.</p>`}
       ${m.sessions.map(s => `<button class="sess${s.id===next?" next":""}" data-action="start-session" data-s="${esc(s.id)}"><span class="id">${esc(s.id)}</span>
         <span class="t"><b>${esc(s.name || "Sesión " + s.id)}</b><small>${esc(sessionSummary(s))}</small></span><span aria-hidden="true">›</span></button>`).join("")}
     </div></div>`;
@@ -319,7 +331,8 @@ function guidelinesCard(m){
 /* ================= Sesión en curso ================= */
 function newActive(month, week, sid){
   const m = DB.months[month]; const s = m.sessions.find(x => x.id === sid);
-  return { id: Date.now().toString(36), date: todayIso(), month, week, session: sid, startedAt: Date.now(),
+  const workout = DB.logs.filter(l => l.month === month).length + 1;
+  return { id: Date.now().toString(36), date: todayIso(), month, week, workout, session: sid, startedAt: Date.now(),
     blocks: s.blocks.map(b => ({ type:b.type, rounds:0, sets:[], kg:{}, checks:{}, secs:null })), notes:"" };
 }
 const actSession = () => { const a = DB.active; const m = a && DB.months[a.month]; return m ? m.sessions.find(s => s.id === a.session) : null; };
@@ -339,7 +352,7 @@ function itemRow(bi, ii, it, w, withKg = true){
     <span class="rp">${esc(repsTxt(it, w))}</span>${withKg && hasLoad(it) ? kgCtl(bi, ii, it) : ""}</div>`;
 }
 function renderSession(){
-  const a = DB.active, s = actSession(), w = a.week;
+  const a = DB.active, s = actSession(), w = a.week; CTX_N = a.workout || null;
   if (!s){ $("#p-train").innerHTML = `<div class="note">El mes de esta sesión ya no está en la app.</div><button class="btn danger" data-action="discard">Descartar sesión</button>`; return; }
   let h = "";
   s.blocks.forEach((b, bi) => {
@@ -353,10 +366,10 @@ function renderSession(){
       body += `<p style="margin:0 0 6px">${esc(b.text)}</p><button class="check" data-action="check" data-b="${bi}" data-i="0" aria-pressed="${!!r.checks[0]}"><span class="box">${r.checks[0] ? "✓" : ""}</span><span class="lbl">Hecho</span></button>`;
     } else if (b.type === "circuit"){
       body += b.items.map((it, ii) => itemRow(bi, ii, it, w)).join("");
-      const tc = wv(b.timeCapMin, w);
+      const tcs = nums(wv(b.timeCapMin, w));
       body += `<div class="row" style="margin-top:10px;justify-content:space-between">
         <div class="counter"><button data-action="rounds" data-b="${bi}" data-d="-1" aria-label="Quitar ronda">−</button><div style="text-align:center"><output>${r.rounds}</output><div class="sub">rondas</div></div><button data-action="rounds" data-b="${bi}" data-d="1" aria-label="Sumar ronda">+</button></div>
-        <button class="btn accent" data-action="run-circuit" data-b="${bi}">▶ ${tc ? fmtSecs(tc*60) : "Cronómetro"}</button></div>
+        <button class="btn accent" data-action="run-circuit" data-b="${bi}">▶ ${tcs.length ? fmtSecs(Math.max(...tcs)*60) : "Cronómetro"}</button></div>
         ${r.secs != null ? `<p class="hint">Tiempo: ${fmtSecs(r.secs)}</p>` : ""}`;
     } else if (b.type === "sets"){
       body += b.items.map((it, ii) => itemRow(bi, ii, it, w, false)).join("");
@@ -364,10 +377,10 @@ function renderSession(){
         body += `<div class="setrow"><span class="n">Serie ${si+1}</span>${b.items.map((it, ii) => `<span class="row" style="gap:6px">${b.items.length > 1 ? `<span class="muted" style="font-size:13px">${esc(it.code || it.name)}</span>` : ""}${repStepper(bi, si, ii, row)}${hasLoad(it) ? kgCtl(bi, ii, it, si) : ""}</span>`).join("")}
           <button class="link" data-action="del-set" data-b="${bi}" data-s="${si}" aria-label="Borrar serie ${si+1}">✕</button></div>`;
       });
-      const rs = wv(b.rest, w);
+      const rsec = restSecs(wv(b.rest, w));
       body += `<div class="row" style="margin-top:8px"><button class="btn primary" data-action="add-set" data-b="${bi}">+ Serie ${r.sets.length+1}</button>
-        ${typeof rs === "number" ? `<button class="btn" data-action="rest" data-b="${bi}">⏱ Descanso ${fmtSecs(rs)}</button>` : ""}</div>
-        ${typeof rs === "number" ? `<p class="hint">Al añadir una serie arranca el descanso.</p>` : ""}`;
+        ${rsec ? `<button class="btn" data-action="rest" data-b="${bi}">⏱ Descanso ${fmtSecs(rsec)}</button>` : ""}</div>
+        ${rsec ? `<p class="hint">Al añadir una serie arranca el descanso${typeof wv(b.rest, w) === "number" ? "" : " (cuenta el mínimo del rango)"}.</p>` : ""}`;
     } else if (b.type === "interval" || b.type === "otm"){
       body += b.items.map((it, ii) => itemRow(bi, ii, it, w)).join("");
       r.sets.forEach((row, si) => {
@@ -429,6 +442,7 @@ document.addEventListener("visibilitychange", () => { if (T && document.visibili
 
 let T = null; // temporizador activo
 function openTimer(cfg){
+  CTX_N = DB.active && DB.active.workout || null;
   if (actx && actx.state === "suspended") actx.resume();
   beep(1, 1, 0.0002);
   T = Object.assign({ t0: performance.now(), lead: S().leadIn, lastBeep: null, done:false }, cfg);
@@ -456,14 +470,15 @@ function countdownBeeps(left, key){ const s = Math.ceil(left); if (s <= 3 && s >
 // Circuito: cuenta atrás del tiempo límite (o cronómetro si no hay) + contador de rondas.
 function runCircuit(bi){
   const a = DB.active, b = actSession().blocks[bi], r = a.blocks[bi];
-  const cap = (wv(b.timeCapMin, a.week) || 0) * 60;
+  const tcs = nums(wv(b.timeCapMin, a.week)); const cap = tcs.length ? Math.max(...tcs) * 60 : 0; const lo = tcs.length > 1 ? Math.min(...tcs) * 60 : 0;
   const base = r.secs || 0;
   openTimer({ label: b.label, kind:"circuit", bi, lead: base ? 0 : S().leadIn, onTick: t => {
     const tt = base + t; T.elapsed = tt;
     $("#timer").classList.add("work");
     if (cap){
       const left = Math.max(0, cap - tt);
-      $("#tBig").textContent = fmtSecs(Math.ceil(left)); $("#tPhase").textContent = "Tiempo restante";
+      $("#tBig").textContent = fmtSecs(Math.ceil(left)); $("#tPhase").textContent = lo ? (T.loHit ? "Mínimo cumplido · puedes seguir" : `Tiempo restante (mínimo ${lo/60} min)`) : "Tiempo restante";
+      if (lo && tt >= lo && !T.loHit){ T.loHit = true; beep(1175, 220); setTimeout(() => beep(1175, 220), 280); vib([150, 80, 150]); toast(`Mínimo cumplido: ${lo/60} min`); }
       if (left <= 60 && !T.warn){ T.warn = true; beep(880, 200); vib(150); }
       countdownBeeps(left, "c");
       if (left <= 0 && !T.done){ T.done = true; endBeep(); r.secs = cap; save(); $("#tPhase").textContent = "¡Tiempo!"; drawTimerControls(); clearInterval(T.iv); }
@@ -592,7 +607,7 @@ function renderHist(){
   logs.forEach(l => {
     const open = ui.openLog === l.id;
     h += `<div class="log"><button class="log-h" data-action="open-log" data-id="${l.id}" aria-expanded="${open}"><span class="d">${esc(fmtDate(l.date))}</span>
-      <span class="c"><span class="pill brand">M${l.month} · S${l.week} · ${esc(l.session)}</span>${l.dur ? `<span class="pill">${fmtDur(l.dur)}</span>` : ""}</span><span aria-hidden="true">${open ? "▾" : "▸"}</span></button>`;
+      <span class="c"><span class="pill brand">M${l.month} · S${l.week} · ${esc(l.session)}${l.workout ? " · #" + l.workout : ""}</span>${l.dur ? `<span class="pill">${fmtDur(l.dur)}</span>` : ""}</span><span aria-hidden="true">${open ? "▾" : "▸"}</span></button>`;
     if (open){
       h += `<ul class="g">${logSummary(l).map(x => `<li>${esc(x)}</li>`).join("")}</ul>${logDetail(l)}${l.notes ? `<p class="hint">«${esc(l.notes)}»</p>` : ""}
         <button class="link" data-action="del-log" data-id="${l.id}" style="color:var(--danger)">Borrar esta sesión</button>`;
@@ -677,12 +692,14 @@ function renderMonthDetail(m){
   (m.sessions || []).forEach(s => {
     h += `<div class="card"><div class="card-b"><h2>${esc(s.name || "Sesión " + s.id)}</h2>${s.note ? `<p class="hint">${esc(s.note)}</p>` : ""}`;
     s.blocks.forEach(b => {
-      const metaW = Array.from({ length: W }, (_, i) => blockMeta(b, i + 1)); const same = metaW.every(x => x === metaW[0]);
-      h += `<h3>${esc(b.label)}</h3><p class="sub" style="margin:0 0 4px">${same ? esc(metaW[0]) : metaW.map((x, i) => `S${i+1}: ${esc(x)}`).join("<br>")}</p>`;
+      const wk = workoutKeys(b);
+      const vars = wk.length ? wk.map(n => ["Entreno " + n, 1, n]) : Array.from({ length: W }, (_, i) => ["S" + (i+1), i + 1, null]);
+      const show = f => { const xs = vars.map(([, w, n]) => { CTX_N = n; return f(w); }); CTX_N = null;
+        return xs.every(x => x === xs[0]) ? esc(xs[0]) : xs.map((x, i) => `${vars[i][0]}: ${esc(x)}`).join("<br>"); };
+      h += `<h3>${esc(b.label)}</h3><p class="sub" style="margin:0 0 4px">${show(w => blockMeta(b, w))}</p>`;
       if (b.text) h += `<p style="margin:4px 0">${esc(b.text)}</p>`;
-      if (b.items) h += `<table class="t"><tbody>${b.items.map(it => {
-        const rw = Array.from({ length: W }, (_, i) => repsTxt(it, i + 1)); const sameR = rw.every(x => x === rw[0]);
-        return `<tr><td>${esc(it.code || "")}</td><td>${esc(it.name)}${it.note ? `<br><span class="sub">${esc(it.note)}</span>` : ""}</td><td>${sameR ? esc(rw[0]) : rw.map((x, i) => `S${i+1}: ${esc(x)}`).join("<br>")}</td></tr>`; }).join("")}</tbody></table>`;
+      if (b.items) h += `<table class="t"><tbody>${b.items.map(it =>
+        `<tr><td>${esc(it.code || "")}</td><td>${esc(it.name)}${it.note ? `<br><span class="sub">${esc(it.note)}</span>` : ""}</td><td>${show(w => repsTxt(it, w))}</td></tr>`).join("")}</tbody></table>`;
     });
     h += `</div></div>`;
   });
@@ -773,11 +790,11 @@ const A = {
   },
   "add-set": b => {
     const bi = Number(b.dataset.b); addSet(bi); render();
-    const blk = actSession().blocks[bi]; const rs = wv(blk.rest, DB.active.week);
-    if (blk.type === "sets" && typeof rs === "number" && rs > 0) runRest(bi, rs);
+    const blk = actSession().blocks[bi]; const rs = restSecs(wv(blk.rest, DB.active.week));
+    if (blk.type === "sets" && rs > 0) runRest(bi, rs);
   },
   "del-set": b => { const r = DB.active.blocks[b.dataset.b]; r.sets.splice(Number(b.dataset.s), 1); save(); render(); },
-  "rest": b => { const bi = Number(b.dataset.b); runRest(bi, wv(actSession().blocks[bi].rest, DB.active.week)); },
+  "rest": b => { const bi = Number(b.dataset.b); runRest(bi, restSecs(wv(actSession().blocks[bi].rest, DB.active.week))); },
   "run-circuit": b => runCircuit(Number(b.dataset.b)),
   "run-interval": b => runInterval(Number(b.dataset.b)),
   "run-otm": b => runOtm(Number(b.dataset.b)),
