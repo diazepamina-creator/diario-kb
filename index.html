@@ -78,6 +78,18 @@ main{max-width:640px;margin:0 auto;padding:12px 16px 24px}
 .sess.next{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand) inset}
 .sess .t{flex:1}.sess .t small{display:block;color:var(--ink-2);font-size:13px}
 .week{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.bar{height:8px;border-radius:99px;background:var(--surface-2);overflow:hidden;margin:8px 0 2px}.bar i{display:block;height:100%;background:var(--accent)}
+input[type=date]{min-height:44px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:inherit;padding:6px 10px;font:inherit}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:8px}
+.cal .h{font-size:11px;font-weight:700;color:var(--ink-3);text-align:center;padding:2px 0}
+.cal .d{min-height:46px;border-radius:8px;border:1px solid transparent;padding:3px 2px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:13px;background:none;color:inherit;font:inherit;cursor:default}
+.cal .d.in{border-color:var(--line)}.cal .d.out{opacity:.35}
+.cal .d.today{border:2px solid var(--brand)}
+.cal .d.tr{background:var(--accent-soft);cursor:pointer}
+.cal .d b{font-size:11px;color:var(--accent);font-weight:800;line-height:1}
+.cal .d em{font-style:normal;font-size:10px;font-weight:800;color:var(--brand-ink);background:var(--brand);border-radius:4px;padding:0 3px;line-height:1.4}
+.calnav{display:flex;align-items:center;justify-content:space-between}
+.calnav button{min-width:44px;min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-size:18px;cursor:pointer}
 .week span{min-width:40px;height:40px;border-radius:10px;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-weight:700}
 .week span.done{background:var(--accent);border-color:var(--accent);color:#fff}
 .week span.nx{border:2px solid var(--brand)}
@@ -178,16 +190,16 @@ ul.g{padding-left:20px;margin:6px 0}ul.g li{margin:3px 0;font-size:15px}
 
 <script>
 "use strict";
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const KEY = "diariokb.v1";
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ALL_KGS = [4,6,8,10,12,14,16,18,20,22,24,26,28,32,36,40,44,48];
 
 /* ================= Datos ================= */
-function fresh(){ return { version:1, settings:{ leadIn:5, kgs:[8,12,16,20,24,28,32,36,40,44] }, months:{}, current:null, logs:[], lastKg:{}, active:null }; }
+function fresh(){ return { version:1, settings:{ leadIn:5, kgs:[8,12,16,20,24,28,32,36,40,44] }, months:{}, current:null, logs:[], lastKg:{}, active:null, past:[] }; }
 function load(){
-  try{ const d = JSON.parse(localStorage.getItem(KEY)); if (d && d.months && d.logs){ const f = fresh(); d.settings = Object.assign(f.settings, d.settings); d.lastKg ||= {}; return d; } }catch(e){}
+  try{ const d = JSON.parse(localStorage.getItem(KEY)); if (d && d.months && d.logs){ const f = fresh(); d.settings = Object.assign(f.settings, d.settings); d.lastKg ||= {}; d.past ||= []; return d; } }catch(e){}
   return fresh();
 }
 let DB = load();
@@ -211,9 +223,20 @@ const fmtDur = s => s >= 3600 ? `${Math.floor(s/3600)} h ${Math.floor((s%3600)/6
 const monthList = () => Object.values(DB.months).sort((a, b) => a.month - b.month);
 const curMonth = () => DB.current && DB.months[DB.current.month] || null;
 function weeksOf(m){ const k = m && m.schedule ? Object.keys(m.schedule).map(Number) : []; return Math.max(4, ...k); }
-function curWeek(){
-  const m = curMonth(); if (!m) return 1;
-  return Math.min(weeksOf(m), Math.max(1, Math.floor(daysBetween(DB.current.start, todayIso()) / 7) + 1));
+// Semana natural desde el día real de inicio (sin tope) y semana del programa (con tope en la última).
+function calWeek(){ return DB.current ? Math.max(1, Math.floor(daysBetween(DB.current.start, todayIso()) / 7) + 1) : 1; }
+function curWeek(){ const m = curMonth(); return m ? Math.min(weeksOf(m), calWeek()) : 1; }
+// Sesiones de la pasada actual del mes (desde el día de inicio): así una segunda pasada no mezcla la primera.
+const periodLogs = () => { const c = DB.current; return c ? DB.logs.filter(l => l.month === c.month && l.date >= c.start) : []; };
+function plannedSessions(m){
+  if (m.schedule) return Object.values(m.schedule).reduce((a, x) => a + x.length, 0);
+  const f = nums(m.frequency)[0]; return (f && f <= 7 ? f : 3) * weeksOf(m);
+}
+// Cierra la pasada actual y empieza otra (mes y fecha dados).
+function startPeriod(month, start){
+  const c = DB.current;
+  if (c && c.start){ const n = periodLogs().length; if (n || c.month !== month) DB.past.push({ month:c.month, start:c.start, end: addDays(start, -1) < c.start ? c.start : addDays(start, -1), sessions:n }); }
+  DB.current = { month, start };
 }
 // Valor fijo, objeto por semana ({"1":…}) u objeto por número de entreno del mes ({"byWorkout":{"1":…}}).
 let CTX_N = null; // número de entreno del mes en contexto
@@ -256,7 +279,7 @@ function workoutKeys(b){
 function sessionSummary(s){ return s.blocks.map(b => b.label).join(" · "); }
 
 /* ================= Estado UI ================= */
-const ui = { tab:"train", openLog:null, viewMonth:null, chartEx:null, tables:{} };
+const ui = { tab:"train", openLog:null, viewMonth:null, chartEx:null, tables:{}, cal: todayIso().slice(0, 7) };
 
 /* ================= Render: cabecera ================= */
 function renderTop(){
@@ -267,7 +290,7 @@ function renderTop(){
     $("#topRight").innerHTML = `<span class="pill brand" id="elapsed">${fmtSecs(Math.floor((Date.now() - a.startedAt)/1000))}</span>`;
   } else {
     const m = curMonth();
-    $("#topTitle").innerHTML = m ? `Mes ${m.month} · ${esc(m.name)}<small>${esc(m.phase || "")}${m.phase ? " · " : ""}semana ${curWeek()} de ${weeksOf(m)}</small>` : `Diario KB<small>Programas mensuales de kettlebell</small>`;
+    $("#topTitle").innerHTML = m ? `Mes ${m.month} · ${esc(m.name)}<small>${esc(m.phase || "")}${m.phase ? " · " : ""}${calWeek() > weeksOf(m) ? `semana extra (${calWeek()}ª)` : `semana ${curWeek()} de ${weeksOf(m)}`}</small>` : `Diario KB<small>Programas mensuales de kettlebell</small>`;
     $("#topRight").innerHTML = "";
   }
   document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === ui.tab ? "page" : "false"));
@@ -290,28 +313,46 @@ function renderTrain(){
       <div class="chips" style="margin-top:10px">${monthList().map(x => `<button class="chip" data-action="start-month" data-m="${x.month}">Mes ${x.month}</button>`).join("")}</div></div></div>`;
     return;
   }
-  const w = curWeek(), W = weeksOf(m);
-  const logsM = DB.logs.filter(l => l.month === m.month);
+  const w = curWeek(), W = weeksOf(m), cw = calWeek();
+  const logsM = periodLogs();
   const logsW = logsM.filter(l => l.week === w);
+  const total = plannedSessions(m), done = logsM.length, complete = done >= total;
+  const over = complete || cw > W; // fuera del calendario previsto
   const plan = m.schedule && m.schedule[w] ? m.schedule[w] : null;
+  const rotate = () => { if (!m.sessions.length) return null; const last = logsM[logsM.length-1]; const i = last ? m.sessions.findIndex(s => s.id === last.session) : -1; return m.sessions[(i + 1) % m.sessions.length].id; };
   let next = null;
-  if (plan){ next = plan[logsW.length] || null; }
-  else if (m.sessions.length){ const last = logsM[logsM.length-1]; const i = last ? m.sessions.findIndex(s => s.id === last.session) : -1; next = m.sessions[(i + 1) % m.sessions.length].id; }
+  if (plan && !over) next = plan[logsW.length] || null;
+  else next = rotate();
+  const nextM = m.month + 1, hasNext = !!DB.months[nextM];
 
-  let h = `<div class="card"><div class="card-b">
-    <div class="row" style="justify-content:space-between"><h2>Semana ${w} de ${W}</h2><span class="sub">${pl(logsW.length, "sesión", "sesiones")} esta semana</span></div>`;
-  if (plan) h += `<div class="week">${plan.map((id, i) => `<span class="${i < logsW.length ? "done" : (i === logsW.length ? "nx" : "")}" aria-label="Sesión ${id}${i < logsW.length ? " hecha" : ""}">${esc(id)}</span>`).join("")}</div>`;
+  let h = "";
+  if (complete && !DB.current.extend){
+    h += `<div class="card"><div class="card-b"><h2>Mes ${m.month} completado</h2>
+      <p class="hint">Has hecho ${done} de ${total} sesiones desde el ${esc(fmtDate(DB.current.start))}. ¿Pasas al siguiente o sigues unos días más con este?</p>
+      <div class="row" style="margin-top:12px;flex-wrap:wrap">
+        ${hasNext ? `<button class="btn accent" data-action="next-month">Pasar al mes ${nextM} · empieza hoy</button>` : `<span class="hint">El mes ${nextM} todavía no está importado.</span>`}
+        <button class="btn" data-action="extend">Seguir con el mes ${m.month}</button></div></div></div>`;
+  } else if (!complete && cw > W){
+    h += `<div class="note">Han pasado ${pl(cw - 1, "semana", "semanas")} desde que empezaste este mes y llevas ${done} de ${total} sesiones. Puedes terminar las que faltan o pasar de mes cuando quieras.${hasNext ? ` <button class="link" data-action="next-month">Pasar al mes ${nextM}</button>` : ""}</div>`;
+  }
+
+  h += `<div class="card"><div class="card-b">
+    <div class="row" style="justify-content:space-between"><h2>${cw > W ? "Semana extra" : `Semana ${w} de ${W}`}</h2><span class="sub">${pl(logsW.length, "sesión", "sesiones")} esta semana</span></div>
+    <div class="bar" role="img" aria-label="${done} de ${total} sesiones del mes"><i style="width:${Math.min(100, Math.round(done / total * 100))}%"></i></div>
+    <p class="hint" style="margin-top:2px">${done} de ${total} sesiones del mes · empezado el ${esc(fmtDate(DB.current.start))}${DB.current.extend && done > total ? ` · alargando (+${done - total})` : ""}</p>`;
+  if (plan && !over) h += `<div class="week">${plan.map((id, i) => `<span class="${i < logsW.length ? "done" : (i === logsW.length ? "nx" : "")}" aria-label="Sesión ${id}${i < logsW.length ? " hecha" : ""}">${esc(id)}</span>`).join("")}</div>`;
   if (m.frequency) h += `<p class="hint">${esc(m.frequency)}</p>`;
   h += `<details style="margin-top:4px"><summary>Ajustar semana o mes</summary>
-      <div class="field" style="margin-top:6px"><label>Semana actual</label><div class="chips">${Array.from({length:W}, (_, i) => `<button class="chip sm" data-action="set-week" data-w="${i+1}" aria-pressed="${w===i+1}">${i+1}</button>`).join("")}</div></div>
+      <div class="field" style="margin-top:6px"><label for="startDate">Día en que empecé este mes</label><input type="date" id="startDate" data-start="1" value="${DB.current.start}" max="${todayIso()}"></div>
+      <div class="field" style="margin-top:10px"><label>Semana actual</label><div class="chips">${Array.from({length:W}, (_, i) => `<button class="chip sm" data-action="set-week" data-w="${i+1}" aria-pressed="${w===i+1}">${i+1}</button>`).join("")}</div></div>
       <div class="field" style="margin-top:10px"><label>Mes</label><div class="chips">${monthList().map(x => `<button class="chip sm" data-action="start-month" data-m="${x.month}" aria-pressed="${x.month===m.month}">${x.month}</button>`).join("")}</div></div>
-      ${w >= W ? `<button class="btn accent" style="margin-top:12px" data-action="next-month">Pasar al mes ${m.month + 1}</button>` : ""}</details>
+      ${hasNext ? `<button class="btn accent" style="margin-top:12px" data-action="next-month">Pasar al mes ${nextM} · empieza hoy</button>` : ""}</details>
     </div></div>`;
 
   if (m.tablesMissing || !m.sessions.length){
     h += `<div class="note">Este mes todavía no tiene las sesiones transcritas (solo las pautas). Importa la versión completa del archivo en la pestaña Meses.</div>`;
   } else {
-    h += `<div class="card"><div class="card-b"><h2>Sesiones</h2>${next ? `<p class="hint" style="margin-top:2px">Toca: sesión ${esc(next)} · entreno ${logsM.length + 1} del mes</p>` : `<p class="hint" style="margin-top:2px">Semana completa. Si quieres, repite alguna.</p>`}
+    h += `<div class="card"><div class="card-b"><h2>Sesiones</h2>${next ? `<p class="hint" style="margin-top:2px">Toca: sesión ${esc(next)} · entreno ${logsM.length + 1} del mes${over ? " (alternando sesiones)" : ""}</p>` : `<p class="hint" style="margin-top:2px">Semana completa. Si quieres, repite alguna.</p>`}
       ${m.sessions.map(s => `<button class="sess${s.id===next?" next":""}" data-action="start-session" data-s="${esc(s.id)}"><span class="id">${esc(s.id)}</span>
         <span class="t"><b>${esc(s.name || "Sesión " + s.id)}</b><small>${esc(sessionSummary(s))}</small></span><span aria-hidden="true">›</span></button>`).join("")}
     </div></div>`;
@@ -331,7 +372,7 @@ function guidelinesCard(m){
 /* ================= Sesión en curso ================= */
 function newActive(month, week, sid){
   const m = DB.months[month]; const s = m.sessions.find(x => x.id === sid);
-  const workout = DB.logs.filter(l => l.month === month).length + 1;
+  const workout = periodLogs().length + 1;
   return { id: Date.now().toString(36), date: todayIso(), month, week, workout, session: sid, startedAt: Date.now(),
     blocks: s.blocks.map(b => ({ type:b.type, rounds:0, sets:[], kg:{}, checks:{}, secs:null })), notes:"" };
 }
@@ -593,6 +634,7 @@ function renderHist(){
   const months = new Set(DB.logs.map(l => l.month)).size;
   let h = `<div class="stats"><div class="stat"><b>${DB.logs.length}</b><span>${DB.logs.length === 1 ? "sesión" : "sesiones"} en total</span></div>
     <div class="stat"><b>${thisWeek}</b><span>esta semana (lun-dom)</span></div><div class="stat"><b>${months}</b><span>${months === 1 ? "mes" : "meses"} con registro</span></div></div>`;
+  h += calendarCard();
   const ser = exerciseKgSeries(); const names = Object.keys(ser).sort();
   if (names.length){
     if (!ui.chartEx || !ser[ui.chartEx]) ui.chartEx = names[0];
@@ -616,6 +658,26 @@ function renderHist(){
   });
   h += `</div></div>`;
   el.innerHTML = h;
+}
+function calendarCard(){
+  const [y, mo] = ui.cal.split("-").map(Number);
+  const first = new Date(y, mo - 1, 1); const off = (first.getDay() + 6) % 7;
+  const startIso = iso(new Date(y, mo - 1, 1 - off));
+  const byDay = {}; DB.logs.forEach(l => (byDay[l.date] ||= []).push(l));
+  const starts = {}; [...DB.past, DB.current].filter(Boolean).forEach(p => { starts[p.start] = p.month; });
+  const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+  let g = ["L","M","X","J","V","S","D"].map(x => `<span class="h">${x}</span>`).join("");
+  for (let i = 0; i < 42; i++){
+    const d = addDays(startIso, i); const dd = parseIso(d); const inM = dd.getMonth() === mo - 1;
+    if (i >= 35 && !inM) break;
+    const ls = byDay[d] || [];
+    const cls = ["d", inM ? "in" : "out", d === todayIso() ? "today" : "", ls.length ? "tr" : ""].join(" ");
+    const lab = `${dd.getDate()}${ls.length ? ": " + ls.map(l => "sesión " + l.session).join(", ") : ""}${starts[d] ? ", empieza el mes " + starts[d] : ""}`;
+    g += `<button class="${cls}" ${ls.length ? `data-action="cal-day" data-d="${d}"` : "tabindex=\"-1\""} aria-label="${esc(lab)}">${dd.getDate()}${starts[d] ? `<em>M${starts[d]}</em>` : ""}${ls.length ? `<b>${esc(ls.map(l => l.session).join(""))}</b>` : ""}</button>`;
+  }
+  return `<div class="card"><div class="card-b"><div class="calnav"><button data-action="cal" data-d="-1" aria-label="Mes anterior">‹</button>
+    <h2 style="margin:0">${MONTHS[mo - 1][0].toUpperCase() + MONTHS[mo - 1].slice(1)} ${y}</h2><button data-action="cal" data-d="1" aria-label="Mes siguiente">›</button></div>
+    <div class="cal">${g}</div><p class="hint">Las letras son las sesiones hechas; «M» marca el día en que empezaste cada mes del programa. Toca un día para ver la sesión.</p></div></div>`;
 }
 function logDetail(l){
   const m = DB.months[l.month]; const s = m && m.sessions.find(x => x.id === l.session); if (!s) return "";
@@ -705,6 +767,9 @@ function renderMonthDetail(m){
   });
   if (m.tablesMissing) h += `<div class="note">Este mes solo tiene las pautas: falta transcribir las sesiones.</div>`;
   if (m.transcriptionNotes && m.transcriptionNotes.length) h += `<div class="card"><div class="card-b"><details><summary>Notas de transcripción</summary><ul class="g">${m.transcriptionNotes.map(x => `<li>${esc(x)}</li>`).join("")}</ul></details></div></div>`;
+  const ps = DB.past.filter(p => p.month === m.month);
+  const cur = DB.current && DB.current.month === m.month ? DB.current : null;
+  if (ps.length || cur) h += `<p class="hint" style="margin:0 0 8px">${[...ps.map(p => `Hecho del ${fmtDate(p.start)} al ${fmtDate(p.end)} · ${pl(p.sessions, "sesión", "sesiones")}`), ...(cur ? [`En curso desde el ${fmtDate(cur.start)}`] : [])].map(esc).join("<br>")}</p>`;
   h += `<div class="row" style="margin-top:4px"><button class="btn primary" data-action="start-month" data-m="${m.month}">Empezar este mes hoy</button><button class="btn danger" data-action="del-month" data-m="${m.month}">Quitar mes</button></div>`;
   $("#p-months").innerHTML = h;
 }
@@ -761,13 +826,16 @@ const A = {
   "start-month": b => {
     const m = Number(b.dataset.m);
     if (DB.current && DB.current.month === m && !confirm(`¿Reiniciar el mes ${m} empezando hoy en la semana 1?`)) return;
-    DB.current = { month:m, start: todayIso() }; ui.viewMonth = null; ui.tab = "train"; save(); render();
+    startPeriod(m, todayIso()); ui.viewMonth = null; ui.tab = "train"; save(); render();
   },
   "next-month": () => {
     const n = DB.current.month + 1;
     if (!DB.months[n]){ toast(`El mes ${n} no está importado`); return; }
-    DB.current = { month:n, start: todayIso() }; save(); render(); window.scrollTo(0, 0);
+    startPeriod(n, todayIso()); save(); render(); window.scrollTo(0, 0); toast(`Empieza el mes ${n}`);
   },
+  "extend": () => { DB.current.extend = true; save(); render(); },
+  "cal": b => { const [y, mo] = ui.cal.split("-").map(Number); const d = new Date(y, mo - 1 + Number(b.dataset.d), 1); ui.cal = `${d.getFullYear()}-${pad(d.getMonth()+1)}`; render(); },
+  "cal-day": b => { const l = DB.logs.filter(x => x.date === b.dataset.d).pop(); if (l){ ui.openLog = l.id; render(); const e = document.querySelector(`[data-id="${l.id}"]`); e && e.scrollIntoView({ block:"center" }); } },
   "set-week": b => { const w = Number(b.dataset.w); DB.current.start = addDays(todayIso(), -(w-1)*7); save(); render(); },
   "start-session": b => {
     if (DB.active && !confirm("Ya hay una sesión en curso. ¿Descartarla y empezar otra?")) return;
@@ -807,7 +875,9 @@ const A = {
   "t-close": () => closeTimer(),
   "finish": () => {
     const a = DB.active; const log = Object.assign({}, a, { dur: Math.round((Date.now() - a.startedAt) / 1000) }); delete log.startedAt;
-    DB.logs.push(log); DB.active = null; save(); render(); window.scrollTo(0, 0); toast("Sesión guardada");
+    DB.logs.push(log); DB.active = null; save(); render(); window.scrollTo(0, 0);
+    const m = curMonth(); const done = periodLogs().length;
+    toast(m && done === plannedSessions(m) ? `¡Mes ${m.month} completado!` : "Sesión guardada");
   },
   "discard": () => { if (confirm("¿Descartar esta sesión sin guardarla?")){ DB.active = null; save(); render(); } },
   "open-log": b => { ui.openLog = ui.openLog === b.dataset.id ? null : b.dataset.id; render(); },
@@ -838,7 +908,17 @@ document.addEventListener("input", e => {
   const t = e.target;
   if (t.dataset && t.dataset.bind && DB.active){ DB.active[t.dataset.bind] = t.value; clearTimeout(saveT); saveT = setTimeout(save, 400); }
 });
-document.addEventListener("change", e => { const t = e.target; if (t.dataset && t.dataset.bindUi){ ui[t.dataset.bindUi] = t.value; render(); } });
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.bindUi){ ui[t.dataset.bindUi] = t.value; render(); }
+  if (t.dataset && t.dataset.start && /^\d{4}-\d{2}-\d{2}$/.test(t.value) && DB.current){
+    const v = t.value > todayIso() ? todayIso() : t.value;
+    const prev = DB.past[DB.past.length - 1];
+    if (prev && v <= prev.start){ toast("Esa fecha es anterior al mes previo"); render(); return; }
+    if (prev && v <= prev.end) prev.end = addDays(v, -1);
+    DB.current.start = v; save(); render(); toast("Fecha de inicio actualizada");
+  }
+});
 document.addEventListener("pointermove", e => { const c = e.target.closest && e.target.closest(".chart"); if (c) chartHover(c, e); });
 document.addEventListener("pointerdown", e => { const c = e.target.closest && e.target.closest(".chart"); if (c) chartHover(c, e); });
 document.addEventListener("pointerout", e => { const c = e.target.closest && e.target.closest(".chart"); if (c && !c.contains(e.relatedTarget)){ c.querySelector(".tip").style.display = "none"; c.querySelector(".xh").setAttribute("visibility", "hidden"); } });
@@ -852,6 +932,7 @@ $("#fileBackup").addEventListener("change", async e => {
     Object.assign(DB.months, d.months);
     const ids = new Set(DB.logs.map(l => l.id)); d.logs.forEach(l => { if (!ids.has(l.id)) DB.logs.push(l); });
     DB.lastKg = Object.assign({}, d.lastKg, DB.lastKg); if (!DB.current && d.current) DB.current = d.current;
+    if (d.past && !DB.past.length) DB.past = d.past;
     if (d.settings) DB.settings = Object.assign(DB.settings, d.settings);
     save(); render(); toast("Copia importada");
   }catch(err){ toast("Ese archivo no es una copia válida de esta app"); }
